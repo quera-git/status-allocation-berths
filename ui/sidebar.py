@@ -41,6 +41,7 @@ FEATURE_DEFAULTS = {
     "feature_classical": False,
     "feature_edit": True,
     "feature_compare": True,
+    "feature_audit_compare": True,
 }
 
 
@@ -277,13 +278,14 @@ def build_sidebar():
         feature_classical = bool(st.session_state.get("feature_classical", False))
         feature_edit = bool(st.session_state.get("feature_edit", True))
         feature_compare = bool(st.session_state.get("feature_compare", True))
+        feature_audit_compare = bool(st.session_state.get("feature_audit_compare", True))
 
         st.caption(
             f"1) {_feature_caption(feature_search)} · "
             f"2) {_feature_caption(feature_qc, ready=False)} · "
             f"3) {_feature_caption(feature_classical, ready=False)} · "
             f"4) {_feature_caption(feature_edit)} · "
-            f"5) {_feature_caption(feature_compare)}"
+            f"5) 비교 {_feature_caption(feature_compare)} / Audit {_feature_caption(feature_audit_compare)}"
         )
 
         # ---------------------------------------------------------
@@ -452,7 +454,7 @@ def build_sidebar():
                 "React 드래그 편집기 사용",
                 value=False,
                 disabled=not feature_edit,
-                help="Plotly 그래프 대신 React 타임라인을 사용합니다. 드래그 후 [저장]을 눌러야 원본 테이블에 반영됩니다.",
+                help="Plotly 그래프 대신 React 타임라인을 사용합니다. 좌우/상하 드래그로 같은 터미널 안에서 이동할 수 있으며, [저장] 후 원본 테이블에 반영됩니다.",
             )
 
             st.caption("현재 편집 중인 결과 전체를 CSV로 내려받을 수 있습니다. 저장 버튼을 누르지 않아도 현재 편집 버퍼 기준으로 내보냅니다.")
@@ -484,16 +486,30 @@ def build_sidebar():
         # ---------------------------------------------------------
         st.divider()
         _anchor("sb-feature-compare")
-        with st.expander("5) Data & Visual Comparison", expanded=feature_compare):
-            st.caption("두 데이터가 있을 때 비교 시각화/비교 표를 함께 보여줄지 제어합니다.")
+        with st.expander("5) Data & Visual Comparison", expanded=(feature_compare or feature_audit_compare)):
+            st.caption("비교 시각화/표 렌더링과, 활성 데이터의 최초 원본 대비 audit 패널을 각각 제어합니다.")
+
+            feature_audit_compare = st.toggle(
+                "최초 원본 대비 audit 패널 표시",
+                key="feature_audit_compare",
+                help="Compare를 꺼도 활성 데이터의 최초 원본 대비 변경사항 요약/표 비교/시각화 비교를 계속 표시합니다.",
+            )
+
             if feature_compare:
                 st.success("비교 모드가 켜져 있습니다. 크롤링/업로드를 함께 렌더링합니다.")
             else:
                 st.info("비교 모드가 꺼져 있습니다. 선택된 데이터만 렌더링하여 더 가볍게 볼 수 있습니다.")
 
+            if feature_audit_compare:
+                st.success("Audit 패널이 켜져 있습니다. 활성 데이터의 최초 원본 대비 변경사항을 별도로 추적합니다.")
+            else:
+                st.info("Audit 패널이 꺼져 있습니다. 최초 원본 대비 비교는 숨겨집니다.")
+
             st.markdown(
-                "- **ON**: 크롤링/업로드가 모두 있을 때 비교 시각화와 비교 표를 함께 표시\n"
-                "- **OFF**: 활성 데이터만 표시해 렌더링 부담을 줄임"
+                "- **Compare ON**: 크롤링/업로드가 모두 있을 때 비교 시각화와 비교 표를 함께 표시\n"
+                "- **Compare OFF**: 활성 데이터만 표시해 렌더링 부담을 줄임\n"
+                "- **Audit ON**: 활성 데이터의 **최초 원본 대비 변경사항**을 항상 별도 패널로 표시\n"
+                "- **Audit OFF**: 최초 원본 대비 audit 패널을 숨김"
             )
 
         # ---------------------------------------------------------
@@ -519,7 +535,7 @@ def build_sidebar():
             "- 상단 **기능명 텍스트**를 클릭하면 해당 섹션으로 이동하고 expander가 자동으로 열립니다.\n"
             "- 1) Selectable Period Search는 **조회 기간/항로/선석/선사/정렬**을 조합해 검색합니다.\n"
             "- 4) Drag & Drop(Edit)를 끄면 그래프는 읽기 전용으로 표시됩니다.\n"
-            "- 5) Data & Visual Comparison을 끄면 **선택 데이터만** 보여주어 렌더링이 더 가벼워집니다.\n"
+            "- 5) Compare를 끄면 **선택 데이터만** 보여주어 렌더링이 더 가벼워집니다. Audit는 별도로 유지할 수 있습니다.\n"
             "- 두 데이터가 있을 때는 **선택 데이터**만 드래그&키 이동 가능합니다 (다른 하나는 읽기 전용).\n"
             "- 그래프 편집 후 표 데이터는 **저장해야 확정**됩니다 (저장 전에는 되돌리기 가능).\n"
             "- **저장**: 원본 테이블까지 동기화\n"
@@ -545,6 +561,7 @@ def build_sidebar():
         "feature_classical": feature_classical,
         "feature_edit": feature_edit,
         "feature_compare": feature_compare,
+        "feature_audit_compare": feature_audit_compare,
         "run_classical": run_classical,
         "classical_config": classical_config,
     }

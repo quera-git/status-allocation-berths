@@ -120,6 +120,14 @@ def _run_with_min_feedback(message: str, fn, caption: str | None = None, min_ms:
     return result
 
 
+def _to_csv_bytes(df: pd.DataFrame | None) -> bytes:
+    if df is None or getattr(df, "empty", True):
+        return b""
+    buf = BytesIO()
+    df.to_csv(buf, index=False, encoding="utf-8-sig")
+    return buf.getvalue()
+
+
 def _queue_pending_action(kind: str, **payload):
     st.session_state["pending_action"] = {"kind": kind, **payload}
     st.rerun()
@@ -130,6 +138,15 @@ def _arm_react_boot(source: str, notice_seconds: float = 1.2):
     st.session_state[f"react_editor_ready_{source}"] = False
     st.session_state[f"react_editor_boot_started_at_{source}"] = started
     st.session_state[f"react_editor_boot_notice_until_{source}"] = started + notice_seconds
+
+
+def _arm_viz_loading(duration_seconds: float = 0.35):
+    now = time.perf_counter()
+    st.session_state["pending_viz_loading"] = True
+    st.session_state["pending_viz_loading_until"] = max(
+        float(st.session_state.get("pending_viz_loading_until", 0.0) or 0.0),
+        now + duration_seconds,
+    )
 
 
 def _process_pending_action():
@@ -230,7 +247,8 @@ def _format_feature_summary(ctrl: dict) -> str:
         f"1) Search {_onoff(bool(ctrl.get('feature_search', True)))} · "
         f"2) QC 준비중 · 3) Classical 준비중 · "
         f"4) Edit {_onoff(bool(ctrl.get('feature_edit', True)))} · "
-        f"5) Compare {_onoff(bool(ctrl.get('feature_compare', True)))}"
+        f"5) Compare {_onoff(bool(ctrl.get('feature_compare', True)))} / "
+        f"Audit {_onoff(bool(ctrl.get('feature_audit_compare', True)))}"
     )
 
 
@@ -406,13 +424,42 @@ def _bind_edit_context(source: str):
     if source == "crawl":
         st.session_state["edit_df"] = st.session_state["edit_df_crawl"].copy()
         st.session_state["orig_df_snapshot"] = st.session_state["snapshot_crawl"].copy()
-        st.session_state["undo_df"] = st.session_state["undo_df_crawl"]
-        st.session_state["edit_logs"] = st.session_state["logs_crawl"]
+        undo_buf = st.session_state.get("undo_df_crawl")
+        st.session_state["undo_df"] = None if undo_buf is None else undo_buf.copy()
+        st.session_state["edit_logs"] = list(st.session_state.get("logs_crawl", []))
     else:
         st.session_state["edit_df"] = st.session_state["edit_df_upload"].copy()
         st.session_state["orig_df_snapshot"] = st.session_state["snapshot_upload"].copy()
-        st.session_state["undo_df"] = st.session_state["undo_df_upload"]
-        st.session_state["edit_logs"] = st.session_state["logs_upload"]
+        undo_buf = st.session_state.get("undo_df_upload")
+        st.session_state["undo_df"] = None if undo_buf is None else undo_buf.copy()
+        st.session_state["edit_logs"] = list(st.session_state.get("logs_upload", []))
+
+
+
+def _frames_are_different(current_df: pd.DataFrame | None, snapshot_df: pd.DataFrame | None, fallback_logs=None) -> bool:
+    if current_df is None or snapshot_df is None:
+        return False
+    try:
+        return not current_df.equals(snapshot_df)
+    except Exception:
+        return bool(fallback_logs)
+
+
+
+def _compute_dirty_for_source(source: str) -> bool:
+    return _frames_are_different(
+        st.session_state.get(f"edit_df_{source}"),
+        st.session_state.get(f"snapshot_{source}"),
+        fallback_logs=st.session_state.get(f"logs_{source}", []),
+    )
+
+
+
+def _sync_dirty_for_source(source: str) -> bool:
+    dirty_now = _compute_dirty_for_source(source)
+    st.session_state[f"edit_dirty_{source}"] = dirty_now
+    return dirty_now
+
 
 
 def _persist_edit_context(source: str):
@@ -420,17 +467,28 @@ def _persist_edit_context(source: str):
     공용 편집 키를 다시 해당 세트로 복사해 둡니다.
     - 인터랙티브 시각화에서 사용자가 이동/드래그/키 조작을 하면 edit_df 값이 갱신되므로,
       그 결과를 세트별 키(edit_df_* / snapshot_* / undo_df_* / logs_*)로 되돌려 반영합니다.
+    - dirty flag도 실제 edit_df vs snapshot 비교 기준으로 동기화합니다.
     """
+    is_dirty = _frames_are_different(
+        st.session_state.get("edit_df"),
+        st.session_state.get("orig_df_snapshot"),
+        fallback_logs=st.session_state.get("edit_logs"),
+    )
+
     if source == "crawl":
         st.session_state["edit_df_crawl"] = st.session_state["edit_df"].copy()
         st.session_state["snapshot_crawl"] = st.session_state["orig_df_snapshot"].copy()
-        st.session_state["undo_df_crawl"] = st.session_state["undo_df"]
-        st.session_state["logs_crawl"] = st.session_state["edit_logs"]
+        undo_buf = st.session_state.get("undo_df")
+        st.session_state["undo_df_crawl"] = None if undo_buf is None else undo_buf.copy()
+        st.session_state["logs_crawl"] = list(st.session_state.get("edit_logs", []))
+        st.session_state["edit_dirty_crawl"] = is_dirty
     else:
         st.session_state["edit_df_upload"] = st.session_state["edit_df"].copy()
         st.session_state["snapshot_upload"] = st.session_state["orig_df_snapshot"].copy()
-        st.session_state["undo_df_upload"] = st.session_state["undo_df"]
-        st.session_state["logs_upload"] = st.session_state["edit_logs"]
+        undo_buf = st.session_state.get("undo_df")
+        st.session_state["undo_df_upload"] = None if undo_buf is None else undo_buf.copy()
+        st.session_state["logs_upload"] = list(st.session_state.get("edit_logs", []))
+        st.session_state["edit_dirty_upload"] = is_dirty
 
 
 # -----------------------------------------------------------------------------
@@ -456,7 +514,7 @@ def handle_sidebar_actions(ctrl: dict):
                 st.session_state["undo_df_crawl"] = None
                 if st.session_state["logs_crawl"]:
                     st.session_state["logs_crawl"].pop()
-                st.session_state["edit_dirty_crawl"] = bool(st.session_state["logs_crawl"])
+                _sync_dirty_for_source("crawl")
                 st.session_state["pending_toast"] = {"msg": "↩️ 되돌리기 완료(크롤링 세트)", "icon": "↩️"}
                 st.info("되돌리기 완료(크롤링 데이터).")
                 st.rerun()
@@ -467,7 +525,7 @@ def handle_sidebar_actions(ctrl: dict):
                 st.session_state["undo_df_upload"] = None
                 if st.session_state["logs_upload"]:
                     st.session_state["logs_upload"].pop()
-                st.session_state["edit_dirty_upload"] = bool(st.session_state["logs_upload"])
+                _sync_dirty_for_source("upload")
                 st.session_state["pending_toast"] = {"msg": "↩️ 되돌리기 완료(업로드 세트)", "icon": "↩️"}
                 st.info("되돌리기 완료(업로드 데이터).")
                 st.rerun()
@@ -527,7 +585,7 @@ def _original_raw_df(source: str) -> pd.DataFrame:
 
 
 def _dirty_flag(source: str) -> bool:
-    return bool(st.session_state["edit_dirty_crawl"] if source == "crawl" else st.session_state["edit_dirty_upload"])
+    return _sync_dirty_for_source(source)
 
 
 def _compare_df(source: str) -> pd.DataFrame:
@@ -647,6 +705,24 @@ def _build_changed_raw_rows(source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return base_changed, curr_changed
 
 
+def _build_audit_export_frames(source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    diff_df = _build_original_compare_preview(source)
+    changed_ids = _changed_row_ids(source)
+    _, changed_curr_raw = _build_changed_raw_rows(source)
+
+    if not changed_curr_raw.empty:
+        return diff_df, changed_curr_raw
+
+    curr_df = _compare_df(source)
+    if curr_df is None or curr_df.empty or not changed_ids or "row_id" not in curr_df.columns:
+        return diff_df, pd.DataFrame()
+
+    curr_changed = curr_df[curr_df["row_id"].isin(changed_ids)].copy()
+    if not curr_changed.empty:
+        curr_changed = curr_changed.sort_values("row_id").reset_index(drop=True)
+    return diff_df, curr_changed
+
+
 def _build_original_compare_preview(source: str) -> pd.DataFrame:
     base = _original_df(source)
     curr = _compare_df(source)
@@ -725,10 +801,12 @@ def _has_original_compare(source: str) -> bool:
 def render_original_compare(ctrl: dict):
     """
     선택 데이터(active_source)에 대해 '최초 조회/불러오기 원본'과 '현재 저장본/편집본'을 비교합니다.
+    - Compare 토글과 분리된 Audit 토글(feature_audit_compare)로 제어합니다.
     - 변경요약에는 시간(x축), 위치(y축), 선석/BP 변화량을 함께 보여줍니다.
     - 표 비교는 전체가 아니라 변경된 선박(row_id)만 원본/현재를 나란히 보여줍니다.
+    - 변경 요약 CSV / 변경 행 CSV를 바로 내보낼 수 있습니다.
     """
-    if not bool(ctrl.get("feature_compare", True)):
+    if not bool(ctrl.get("feature_audit_compare", True)):
         return
 
     source = ctrl["active_source"]
@@ -741,10 +819,6 @@ def render_original_compare(ctrl: dict):
         return
 
     diff_df = _build_original_compare_preview(source)
-    if diff_df.empty:
-        return
-
-    changed_base_raw, changed_curr_raw = _build_changed_raw_rows(source)
 
     st.subheader(f"🔎 최초 원본 대비 비교 ({label})")
     mode_label = "편집 버퍼" if is_dirty else "저장본"
@@ -753,7 +827,40 @@ def render_original_compare(ctrl: dict):
     c2.metric("비교 기준", "최초 원본")
     c3.metric("현재 비교 대상", mode_label)
 
-    st.caption("원본은 최초 조회/불러오기 시점 그대로 보존됩니다. 변경 요약에는 시간(x축)·위치(y축) 변화량과 선석/BP 이동이 함께 표시됩니다.")
+    st.caption(
+        "원본은 최초 조회/불러오기 시점 그대로 보존됩니다. "
+        "변경 요약에는 시간(x축)·위치(y축) 변화량과 선석/BP 이동이 함께 표시됩니다. "
+        "Compare를 꺼도 이 audit 패널은 별도로 유지됩니다."
+    )
+
+    if diff_df.empty:
+        st.success("현재 선택 데이터는 최초 원본 대비 변경사항이 없습니다.")
+        return
+
+    changed_base_raw, changed_curr_raw = _build_changed_raw_rows(source)
+    diff_export_df, changed_export_df = _build_audit_export_frames(source)
+
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "변경 요약 CSV",
+            data=_to_csv_bytes(diff_export_df),
+            file_name=f"{source}_audit_summary.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=diff_export_df.empty,
+            help="최초 원본 대비 바뀐 row_id와 시간/위치 변화량 요약을 내려받습니다.",
+        )
+    with dl2:
+        st.download_button(
+            "변경 행 CSV",
+            data=_to_csv_bytes(changed_export_df),
+            file_name=f"{source}_audit_changed_rows.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=changed_export_df.empty,
+            help="현재 편집 버퍼/저장본 기준의 변경 행만 내려받습니다.",
+        )
 
     view_mode = st.radio(
         "원본 대비 보기",
@@ -808,11 +915,12 @@ def render_original_compare(ctrl: dict):
             st.info("오른쪽 표는 저장 전 편집 버퍼를 원본 컬럼 구조(raw)에 임시 반영한 미리보기입니다.")
         return
 
-    st.caption("시각화 비교는 읽기 전용으로 렌더링됩니다.")
-    render_origin_view_static(base_df, title_prefix=f"{label} 최초 원본")
-    st.markdown("---")
-    render_origin_view_static(curr_df, title_prefix=f"{label} 현재 {'편집본' if is_dirty else '저장본'}")
-
+    st.caption("최초 원본과 현재 데이터를 각각 읽기 전용 타임라인으로 비교합니다.")
+    c1, c2 = st.columns(2)
+    with c1:
+        render_origin_view_static(base_df, title_prefix=f"{label} 최초 원본")
+    with c2:
+        render_origin_view_static(curr_df, title_prefix=f"{label} 현재 {'편집 미리보기' if is_dirty else '저장본'}")
 
 def _render_with_optional_loading(message: str, show_loading: bool, fn, min_ms: int = 250):
     if show_loading:
@@ -879,9 +987,11 @@ def render_visualizations_and_validation(ctrl: dict):
 
             react_ready_key = f"react_editor_ready_{active_source}"
             react_notice_until = float(st.session_state.get(f"react_editor_boot_notice_until_{active_source}", 0.0) or 0.0)
-            react_is_ready = bool(st.session_state.get(react_ready_key, False))
-            if (not react_is_ready) or (time.perf_counter() < react_notice_until):
-                st.info("React 드래그 편집기를 여는 중입니다. 편집기가 준비되면 바로 드래그할 수 있습니다.")
+            react_booting = time.perf_counter() < react_notice_until
+            if react_booting and not pending_viz_loading:
+                st.info("React 드래그 편집기를 여는 중입니다. 준비되는 동안 로딩 안내를 먼저 보여드립니다.")
+            elif not react_booting and not bool(st.session_state.get(react_ready_key, False)):
+                st.session_state[react_ready_key] = True
 
             _render_active_source(active_source)
             return
@@ -971,14 +1081,25 @@ def _render_raw_panel(source_key: str, label: str, editable: bool):
                 st.session_state[f"snapshot_{source_key}"] = new_norm.copy()
                 st.session_state[f"undo_df_{source_key}"] = None
                 st.session_state[f"logs_{source_key}"] = []
+                st.session_state[f"edit_dirty_{source_key}"] = False
                 st.session_state["show_viz"] = True
                 st.session_state[f"{key_prefix}_mode"] = False
                 st.success(f"{label} 원본 저장 완료(그래프 갱신).")
                 st.rerun()
         else:
-            show_table(df_raw, f"🧾 {label} 원본")
+            show_table(
+                df_raw,
+                f"🧾 {label} 원본",
+                light_mode=bool(st.session_state.get("show_viz", False)),
+                key=f"raw-{source_key}",
+            )
     else:
-        show_table(df_raw, f"🧾 {label} 원본 (읽기 전용)")
+        show_table(
+            df_raw,
+            f"🧾 {label} 원본 (읽기 전용)",
+            light_mode=bool(st.session_state.get("show_viz", False)),
+            key=f"raw-{source_key}-readonly",
+        )
 
 
 def render_raw_tables(ctrl: dict):
@@ -1070,8 +1191,15 @@ def main():
     prev_active_source_for_react = st.session_state.get("prev_active_source_for_react", "crawl")
     current_use_react_drag = bool(ctrl.get("use_react_drag", False))
     current_active_source = ctrl.get("active_source", "crawl")
-    if current_use_react_drag and (not prev_use_react_drag or prev_active_source_for_react != current_active_source):
+    react_mode_changed = current_use_react_drag != prev_use_react_drag
+    react_source_changed = current_use_react_drag and (prev_active_source_for_react != current_active_source)
+
+    if current_use_react_drag and (react_mode_changed or react_source_changed):
         _arm_react_boot(current_active_source, notice_seconds=1.5)
+        if st.session_state.get("show_viz"):
+            _arm_viz_loading(0.45)
+    elif react_mode_changed and st.session_state.get("show_viz"):
+        _arm_viz_loading(0.25)
 
     st.session_state["prev_use_react_drag"] = current_use_react_drag
     st.session_state["prev_active_source_for_react"] = current_active_source
@@ -1097,8 +1225,7 @@ def main():
     st.caption(f"연구 기능 상태 · {_format_feature_summary(ctrl)}")
 
     dirty_src = ctrl["active_source"]
-    dirty_key = "edit_dirty_crawl" if dirty_src == "crawl" else "edit_dirty_upload"
-    if st.session_state.get(dirty_key):
+    if _dirty_flag(dirty_src):
         dirty_label = "크롤링" if dirty_src == "crawl" else "업로드"
         st.warning(f"{dirty_label} 편집 버퍼에 저장 전 변경사항이 있습니다. 현재 그래프에는 반영되지만 원본 표에는 [저장] 후 동기화됩니다.")
 

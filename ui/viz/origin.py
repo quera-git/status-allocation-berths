@@ -194,7 +194,8 @@ def _apply_move(
         if current_len <= 0:
             current_len = 10.0
 
-        t1 = _infer_terminal(str(t0 or ""), target_terminal, target_berth)
+        base_terminal = str(t0 or "").upper().strip()
+        t1 = base_terminal if base_terminal in {"SND", "GAM"} else _infer_terminal(base_terminal, target_terminal, target_berth)
         layout = terminal_layout(t1) or terminal_layout(t0)
         if layout:
             y_max = float(layout["y_max"])
@@ -214,7 +215,15 @@ def _apply_move(
             y1 = new_mid
             bp1 = int(round(new_mid))
             inferred = infer_berth_from_y(t1, new_mid)
-            b1 = int(target_berth) if target_berth is not None else (inferred if inferred is not None else b0)
+            target_berth_same_terminal = None
+            if target_berth is not None:
+                try:
+                    tb = int(target_berth)
+                    if _infer_terminal(t1, None, tb) == t1:
+                        target_berth_same_terminal = tb
+                except Exception:
+                    target_berth_same_terminal = None
+            b1 = target_berth_same_terminal if target_berth_same_terminal is not None else (inferred if inferred is not None else b0)
 
             if (
                 (not _num_equal(f0, f1))
@@ -280,7 +289,7 @@ def render_origin_view(df_origin: pd.DataFrame):
         events = plotly_events(
             fig,
             click_event=True,
-            hover_event=True,
+            hover_event=False,
             select_event=False,
             override_height=600,
             override_width=2400,
@@ -381,7 +390,7 @@ def render_origin_view_drag(df_origin: pd.DataFrame):
         st.session_state["selected_row_id"] = None
 
     st.subheader("🚢 신항/감만 React 드래그 편집기")
-    st.caption("· 좌우 드래그: 5분 스냅 · 상하 드래그: 30m 스냅 · 선석은 y축 위치에 맞춰 자동 변경 · 드롭 시 한 번만 Streamlit 반영")
+    st.caption("· 좌우 드래그: 5분 스냅 · 상하 드래그: 30m 스냅 · 같은 터미널 안에서 berth 자유 이동 · 선석은 y축 위치에 맞춰 자동 변경 · 드롭 시 한 번만 Streamlit 반영")
 
     df_all = st.session_state.get("edit_df")
     if df_all is None or not isinstance(df_all, pd.DataFrame) or df_all.empty:

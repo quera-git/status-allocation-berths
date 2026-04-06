@@ -59,6 +59,7 @@ type DragState = {
   baseF: number;
   baseE: number;
   baseY: number;
+  pointerOffsetFromMidPx: number;
 };
 
 type DraftPatch = { rowId: number; patch: Partial<EnrichedItem> | null };
@@ -189,6 +190,7 @@ const Timeline: React.FC<TimelineProps> = ({
   const rafRef = useRef<number | null>(null);
   const pendingDraftRef = useRef<DraftPatch | null>(null);
   const eventSeqRef = useRef(0);
+  const terminalSvgRefs = useRef<Record<TerminalKey, SVGSVGElement | null>>({ SND: null, GAM: null });
   const [draft, setDraft] = useState<Record<number, Partial<EnrichedItem>>>({});
 
   useEffect(() => {
@@ -240,6 +242,11 @@ const Timeline: React.FC<TimelineProps> = ({
   const nowMs = Date.now();
   const ticks = useMemo(() => tickLabels(x0, x1), [x0, x1]);
 
+  const resolvePointerTarget = (_evt: PointerEvent, fallback: TerminalKey) => {
+    const fallbackSvg = terminalSvgRefs.current[fallback];
+    return { terminal: fallback, rect: fallbackSvg?.getBoundingClientRect() ?? null };
+  };
+
   useEffect(() => {
     if (rootRef.current) {
       const h = rootRef.current.getBoundingClientRect().height;
@@ -281,54 +288,69 @@ const Timeline: React.FC<TimelineProps> = ({
     const toX = (t: Date) => margin.left + (t.getTime() - x0) * pxPerMs;
     const toY = (v: number) => margin.top + v * pxPerMeter;
 
-    const onDragMove = (evt: PointerEvent, state: DragState) => {
+    const computeDropTarget = (evt: PointerEvent, state: DragState) => {
       const dx = evt.clientX - state.startClientX;
-      const dyPx = evt.clientY - state.startClientY;
       const dmin = snapMinutes(dx / pxPerMin);
-      const dyMeters = snapMeters(dyPx / pxPerMeter);
+      const resolved = resolvePointerTarget(evt, state.terminal);
+      const targetTerminal = resolved.terminal;
+      const targetMeta = TERMINAL_META[targetTerminal];
+      const targetInnerHeight = Math.max(380, Math.round(targetMeta.yMax * 0.32));
+      const targetPxPerMeter = targetInnerHeight / targetMeta.yMax;
 
-      if (dmin === 0 && dyMeters === 0) {
+      const length = Math.abs(state.baseE - state.baseF);
+      const minMid = length / 2;
+      const maxMid = Math.max(minMid, targetMeta.yMax - length / 2);
+
+      let rawMid = state.baseY;
+      if (resolved.rect) {
+        const centerPx = evt.clientY - resolved.rect.top - margin.top - state.pointerOffsetFromMidPx;
+        rawMid = centerPx / targetPxPerMeter;
+      } else {
+        const dyPx = evt.clientY - state.startClientY;
+        rawMid = state.baseY + dyPx / pxPerMeter;
+      }
+
+      const newMid = snapMeters(clamp(rawMid, minMid, maxMid));
+      const newF = newMid - length / 2;
+      const newE = newMid + length / 2;
+      const targetBerth = inferBerth(targetTerminal, newMid);
+      const newStart = new Date(state.baseStart + dmin * 60 * 1000);
+      const newEnd = new Date(state.baseEnd + dmin * 60 * 1000);
+      const moved = dmin !== 0 || targetTerminal !== state.terminal || Math.abs(newMid - state.baseY) >= 1e-6;
+
+      return {
+        moved,
+        dmin,
+        targetTerminal,
+        targetBerth,
+        targetYMid: newMid,
+        targetF: newF,
+        targetE: newE,
+        newStart,
+        newEnd,
+      };
+    };
+
+    const onDragMove = (evt: PointerEvent, state: DragState) => {
+      const target = computeDropTarget(evt, state);
+      if (!target.moved) {
         scheduleDraft(state.rowId, null);
         return;
       }
 
-      const length = Math.abs(state.baseE - state.baseF);
-      const minMid = length / 2;
-      const maxMid = Math.max(minMid, meta.yMax - length / 2);
-      const rawMid = state.baseY + dyMeters;
-      const newMid = snapMeters(clamp(rawMid, minMid, maxMid));
-      const newF = newMid - length / 2;
-      const newE = newMid + length / 2;
-      const targetBerth = inferBerth(terminal, newMid);
-
-      const newStart = new Date(state.baseStart + dmin * 60 * 1000);
-      const newEnd = new Date(state.baseEnd + dmin * 60 * 1000);
-
       scheduleDraft(state.rowId, {
-        startDate: newStart,
-        endDate: newEnd,
-        f: newF,
-        e: newE,
-        y_m: newMid,
-        berth: targetBerth,
-        terminal,
+        startDate: target.newStart,
+        endDate: target.newEnd,
+        f: target.targetF,
+        e: target.targetE,
+        y_m: target.targetYMid,
+        berth: target.targetBerth,
+        terminal: target.targetTerminal,
       });
     };
 
     const onDragEnd = (evt: PointerEvent, state: DragState) => {
-      const dx = evt.clientX - state.startClientX;
-      const dyPx = evt.clientY - state.startClientY;
-      const dmin = snapMinutes(dx / pxPerMin);
-      const dyMeters = snapMeters(dyPx / pxPerMeter);
-
-      const length = Math.abs(state.baseE - state.baseF);
-      const minMid = length / 2;
-      const maxMid = Math.max(minMid, meta.yMax - length / 2);
-      const rawMid = state.baseY + dyMeters;
-      const newMid = snapMeters(clamp(rawMid, minMid, maxMid));
-      const newF = newMid - length / 2;
-      const newE = newMid + length / 2;
-      const targetBerth = inferBerth(terminal, newMid);
+      const target = computeDropTarget(evt, state);
 
       setDraft((prev) => {
         const next = { ...prev };
@@ -338,7 +360,7 @@ const Timeline: React.FC<TimelineProps> = ({
       dragRef.current = null;
 
       if (!onEvents) return;
-      if (dmin === 0 && dyMeters === 0) return;
+      if (!target.moved) return;
 
       eventSeqRef.current += 1;
       onEvents({
@@ -346,13 +368,13 @@ const Timeline: React.FC<TimelineProps> = ({
         events: [
           {
             row_id: state.rowId,
-            dmin,
-            dy: dyMeters,
-            target_terminal: terminal,
-            target_berth: targetBerth,
-            target_y_m: newMid,
-            target_f: newF,
-            target_e: newE,
+            dmin: target.dmin,
+            dy: target.targetYMid - state.baseY,
+            target_terminal: target.targetTerminal,
+            target_berth: target.targetBerth,
+            target_y_m: target.targetYMid,
+            target_f: target.targetF,
+            target_e: target.targetE,
           },
         ],
       });
@@ -369,6 +391,8 @@ const Timeline: React.FC<TimelineProps> = ({
       }
 
       const baseY = Number.isFinite(item.y_m) ? item.y_m : (item.f + item.e) / 2;
+      const svgRect = terminalSvgRefs.current[terminal]?.getBoundingClientRect() ?? null;
+      const barCenterPx = svgRect ? (svgRect.top + margin.top + baseY * pxPerMeter) : evt.clientY;
       const state: DragState = {
         rowId: item.row_id,
         pointerId: evt.pointerId,
@@ -380,6 +404,7 @@ const Timeline: React.FC<TimelineProps> = ({
         baseF: item.f,
         baseE: item.e,
         baseY,
+        pointerOffsetFromMidPx: evt.clientY - barCenterPx,
       };
       dragRef.current = state;
 
@@ -409,12 +434,12 @@ const Timeline: React.FC<TimelineProps> = ({
         <div className="terminal-head">
           <div className="terminal-name">{meta.label}</div>
           <div className="terminal-meta">
-            <span>Berth 자유 이동 · Snap 5min / 30m</span>
+            <span>같은 터미널 내 이동 · Snap 5min / 30m</span>
             <span className="total-count">{itemsForTerminal.length} vessels</span>
           </div>
         </div>
         <div className="timeline-canvas">
-          <svg width={svgWidth} height={svgHeight} role="presentation">
+          <svg ref={(node) => { terminalSvgRefs.current[terminal] = node; }} width={svgWidth} height={svgHeight} role="presentation">
             <defs>
               <linearGradient id={`bg-${terminal}`} x1="0" x2="0" y1="0" y2="1">
                 <stop offset="0%" stopColor="rgba(255,255,255,0.96)" />
@@ -590,7 +615,7 @@ const Timeline: React.FC<TimelineProps> = ({
         <div>
           <div className="title">React Drag & Drop Timeline</div>
           <div className="subtitle">
-            Drag horizontally (5 min snap) or vertically (30 m snap). Berth updates automatically from the Y position.
+            Drag horizontally (5 min snap) and vertically (30 m snap) within the same terminal. Berth updates automatically from the Y position.
           </div>
         </div>
         {legend}

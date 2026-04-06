@@ -5,6 +5,7 @@ lxml>=4.9
 requests>=2.31
 playwright>=1.45
 sqlalchemy>=2.0
+gurobipy>=13.0
 streamlit-vis-timeline==0.3.0
 openpyxl>=3.1.0
 plotly>=5.22
